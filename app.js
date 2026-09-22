@@ -120,6 +120,7 @@ function getPipDecimals(quoteStr) {
 let isAutoTradingEO = false;
 let isAutoTradingOU = false;
 let autoBulkCooldown = false; 
+let ouPatternArmed = false; // true from the instant the 2-digit pattern confirms until the pair fires on the next tick
 let totalTradesExecutedOU = 0; 
 let ouPatternMatchLabel = null;
 
@@ -387,9 +388,12 @@ const over2RunProgressDisplay = document.getElementById('over2-run-progress');
 let isBulkOver2Armed = false;
 let bulkOver2TriggersFired = 0;
 let bulkOver2Cooldown = false;
+let bulkOver2PatternPending = false; // (double-digit trigger mode only) true from the instant the pair confirms until it fires on the next tick
 let isAutoTradingPOU = false;
 let totalTradesExecutedPOU = 0;
 let patternCooldown = false;
+let pouArmed = false; // true from the instant the 1/2 or 7/8 pattern confirms until it fires on the next tick
+let pouArmedMatch = null;
 let recentDigitHistory = []; 
 let digitFrequencyWindow = []; // rolling window for Differs auto-predict (hot digit)
 const HOT_DIGIT_WINDOW_SIZE = 20;
@@ -699,6 +703,7 @@ function armBulkOver2() {
 
 function disarmBulkOver2() {
     isBulkOver2Armed = false;
+    bulkOver2PatternPending = false;
     btnBuyBulkOver2.textContent = "Arm Bulk Over 2";
     btnBuyBulkOver2.classList.remove('stream-active');
     tradeStakeOver2.disabled = false;
@@ -1266,17 +1271,27 @@ function handleIncomingTickPacket(tickData) {
         if (isRSIBotRunning) evaluateRSIBotEntry();
         if (isAIO1U8Running) evaluateAIO1U8Entry();
 
-        if (isAutoTradingPOU && !patternCooldown) {
+        // Pattern OU: "fire if armed" runs BEFORE pattern detection, same as AI Over 2/Under 7 -
+        // a pattern completing on tick N arms the bot, and it fires strictly on tick N+1, in that
+        // tick's own handler call, with no setTimeout in between (no added delay).
+        if (isAutoTradingPOU && !patternCooldown && pouArmed) {
+            pouArmed = false;
+            const armedMatch = pouArmedMatch;
+            pouArmedMatch = null;
+            patternMatch = armedMatch;
+            executePatternOverUnder(armedMatch);
+            patternFired = true;
+        } else if (isAutoTradingPOU && !patternCooldown) {
             const maxAllowed = parseInt(maxTradesPOUInput.value, 10) || 10;
             if (totalTradesExecutedPOU + 1 > maxAllowed) {
                 stopAutoPOU = true;
             } else {
                 const match = matchDigitPattern(recentDigitHistory);
                 if (match) {
-                    patternMatch = match;
-                    executePatternOverUnder(match);
+                    pouArmed = true;
+                    pouArmedMatch = match;
                     recentDigitHistory = [];
-                    patternFired = true;
+                    logToConsole(`[Pattern OU] Pattern matched (${match.label}) \u2014 armed, firing on the next tick.`, "success-msg");
                 }
             }
         }
@@ -1284,11 +1299,17 @@ function handleIncomingTickPacket(tickData) {
         if (isBulkOver2Armed && !bulkOver2Cooldown) {
             const isDoubleMode = triggerModeOver2Select && triggerModeOver2Select.value === 'double';
             if (isDoubleMode) {
-                const digitA = parseInt(triggerDigitOver2Input.value, 10);
-                const digitB = parseInt(triggerDigit2Over2Input.value, 10);
-                if (matchConsecutivePair(recentDigitHistory, digitA, digitB)) {
+                if (bulkOver2PatternPending) {
+                    bulkOver2PatternPending = false;
                     fireBulkOver2Batch();
-                    recentDigitHistory = [];
+                } else {
+                    const digitA = parseInt(triggerDigitOver2Input.value, 10);
+                    const digitB = parseInt(triggerDigit2Over2Input.value, 10);
+                    if (matchConsecutivePair(recentDigitHistory, digitA, digitB)) {
+                        recentDigitHistory = [];
+                        bulkOver2PatternPending = true;
+                        logToConsole("[Bulk Over] Pattern matched \u2014 armed, firing on the next tick.", "success-msg");
+                    }
                 }
             } else {
                 const triggerDigit = parseInt(triggerDigitOver2Input.value, 10);
@@ -1314,16 +1335,27 @@ function handleIncomingTickPacket(tickData) {
         }
         else if (isAutoTradingOU && !autoBulkCooldown) {
             const usePatternTriggerOU = patternTriggerOUCheckbox && patternTriggerOUCheckbox.checked;
-            let ouShouldFire = true;
+            let ouShouldFire = false;
 
             if (usePatternTriggerOU) {
-                const overDigit = parseInt(predOverInput.value, 10);
-                const underDigit = parseInt(predUnderInput.value, 10);
-                ouShouldFire = matchOUTriggerPair(recentDigitHistory, overDigit, underDigit);
-                if (ouShouldFire) {
-                    ouPatternMatchLabel = `${recentDigitHistory[0]} \u2192 ${recentDigitHistory[1]}`;
-                    recentDigitHistory = [];
+                // Same two-phase model as AI Over 2/Under 7: confirming the pair on tick N arms
+                // the bot; it fires strictly on tick N+1, in that tick's own handler call - never
+                // on the same tick it just armed on, and never delayed past that next tick.
+                if (ouPatternArmed) {
+                    ouPatternArmed = false;
+                    ouShouldFire = true;
+                } else {
+                    const overDigit = parseInt(predOverInput.value, 10);
+                    const underDigit = parseInt(predUnderInput.value, 10);
+                    if (matchOUTriggerPair(recentDigitHistory, overDigit, underDigit)) {
+                        ouPatternMatchLabel = `${recentDigitHistory[0]} \u2192 ${recentDigitHistory[1]}`;
+                        recentDigitHistory = [];
+                        ouPatternArmed = true;
+                        logToConsole(`[Bulk Auto] Pattern matched (${ouPatternMatchLabel}) \u2014 armed, firing on the next tick.`, "system-msg");
+                    }
                 }
+            } else {
+                ouShouldFire = true;
             }
 
             if (ouShouldFire) {
@@ -2358,6 +2390,8 @@ function toggleAutoPOU(state) {
 
     if (state) {
         patternCooldown = false;
+        pouArmed = false;
+        pouArmedMatch = null;
         totalTradesExecutedPOU = 0;
         recentDigitHistory = [];
         if (patternLastMatchDisplay) patternLastMatchDisplay.textContent = "None";
@@ -2684,6 +2718,7 @@ function toggleAutoOU(state) {
 
     if(state) {
         autoBulkCooldown = false; 
+        ouPatternArmed = false;
         totalTradesExecutedOU = 0; 
         ouPatternMatchLabel = null;
         ouLoopCycleCount = 0;
