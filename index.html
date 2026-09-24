@@ -171,6 +171,7 @@
             <button class="tab-btn" data-target="tab-dbot-ou">Auto Over/Under (DBot)</button>
             <button class="tab-btn" data-target="tab-accumulator">Accumulator</button>
             <button class="tab-btn" data-target="tab-rsi-bot">AI Only Ups/Downs</button>
+            <button class="tab-btn" data-target="tab-bulk-onlyud">Bulk Only Ups/Downs (AI Entry)</button>
             <button class="tab-btn" data-target="tab-ai-o1u8">AI Over 1/Under 8</button>
             <button class="tab-btn" data-target="tab-ai-o2u7">AI Over 2/Under 7</button>
         </div>
@@ -828,6 +829,84 @@
                 <span>Even Count: <strong id="rsi-bot-even-count">--</strong></span>
                 <span>P/L: <strong id="rsi-bot-pl">--</strong></span>
                 <span>Status: <strong id="rsi-bot-status-text" class="system-msg">Idle</strong></span>
+            </div>
+        </section>
+
+        <!-- STRATEGY: Bulk Only Ups/Downs with AI entry filter -->
+        <section class="card tab-content" id="tab-bulk-onlyud">
+            <h3>Bulk Only Ups/Downs (AI Entry)</h3>
+            <p style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 8px;">
+                Places Only Ups (RUNHIGH) and Only Downs (RUNLOW) at the same tick, like Bulk Over/Under does for
+                digit contracts &mdash; but unlike Over/Under, these two aren't complementary: any single reversal
+                tick kills a run, so both sides losing together is common, not rare. Firing them 50/50 on every
+                tick is just two coin flips. Instead this waits for an entry filter (RSI extreme + a live
+                same-direction streak already in progress) before firing, then splits stake by how strongly the
+                signal favors each side rather than betting them equally. The non-favored side is a smaller,
+                independent bet sized by the Hedge Ratio below &mdash; not a hedge in the insurance sense, since a
+                reversal that kills one side doesn't make the other side more likely to win.
+            </p>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Initial Stake:</label>
+                    <input type="number" id="bulk-onlyud-initial-stake" value="5" min="0.50" step="0.50">
+                </div>
+                <div class="form-group">
+                    <label>Duration (Ticks):</label>
+                    <input type="number" id="bulk-onlyud-duration" value="3" min="1" max="10">
+                </div>
+                <div class="form-group">
+                    <label>Martingale Multiplier:</label>
+                    <input type="number" id="bulk-onlyud-martingale" value="1.3" min="1" step="0.1">
+                </div>
+            </div>
+            <div class="form-row" style="margin-top: 10px;">
+                <div class="form-group">
+                    <label>Take Profit ($):</label>
+                    <input type="number" id="bulk-onlyud-take-profit" value="50" min="0" step="1">
+                </div>
+                <div class="form-group">
+                    <label>Stop Loss ($):</label>
+                    <input type="number" id="bulk-onlyud-stop-loss" value="1000" min="0" step="1">
+                </div>
+            </div>
+            <div class="form-row" style="margin-top: 10px;">
+                <div class="form-group">
+                    <label>RSI Period:</label>
+                    <input type="number" id="bulk-onlyud-rsi-period" value="14" min="2" max="50">
+                </div>
+                <div class="form-group">
+                    <label>Min Same-Direction Streak:</label>
+                    <input type="number" id="bulk-onlyud-min-streak" value="3" min="1" max="10"
+                        title="How many consecutive same-direction ticks must already be happening before entry">
+                </div>
+            </div>
+            <div class="form-row" style="margin-top: 10px;">
+                <div class="form-group">
+                    <label>Ups: RSI Above</label>
+                    <input type="number" id="bulk-onlyud-ups-rsi" value="60" min="0" max="100">
+                </div>
+                <div class="form-group">
+                    <label>Downs: RSI Below</label>
+                    <input type="number" id="bulk-onlyud-downs-rsi" value="40" min="0" max="100">
+                </div>
+            </div>
+            <div class="form-row" style="margin-top: 10px;">
+                <div class="form-group">
+                    <label>Hedge Ratio (0-1):</label>
+                    <input type="number" id="bulk-onlyud-hedge-ratio" value="0.25" min="0" max="1" step="0.05"
+                        title="Stake on the non-favored side, as a fraction of the favored side's stake">
+                </div>
+            </div>
+            <div style="display: flex; gap: 10px; margin-top: 14px;">
+                <button id="btn-run-bulk-onlyud" class="btn-primary" style="background-color: var(--accent-green); flex: 1;"
+                    disabled>Run</button>
+            </div>
+            <div class="balance-display" id="bulk-onlyud-status" style="display: none; padding: 10px 12px; font-size: 0.85rem; justify-content: space-between; margin-top: 10px; flex-wrap: wrap; gap: 6px;">
+                <span>Stake: <strong id="bulk-onlyud-current-stake">--</strong></span>
+                <span>RSI: <strong id="bulk-onlyud-rsi-value">--</strong></span>
+                <span>Streak: <strong id="bulk-onlyud-streak-value">--</strong></span>
+                <span>P/L: <strong id="bulk-onlyud-pl">--</strong></span>
+                <span>Status: <strong id="bulk-onlyud-status-text" class="system-msg">Idle</strong></span>
             </div>
         </section>
 
