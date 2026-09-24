@@ -3319,6 +3319,7 @@ function updateTradeControlsState(isActive) {
     btnRunDBotOU.disabled = !isReady;
     btnRunAccu.disabled = !isReady;
     btnRunRSIBot.disabled = !isReady;
+    btnRunBulkOnlyUD.disabled = !isReady;
     btnRunAIO1U8.disabled = !isReady;
     btnRunAIO2U7.disabled = !isReady;
     if (!isReady) { toggleAutoEO(false); toggleAutoOU(false); toggleAutoPOU(false); if (isDBotOURunning) stopDBotOU("Stream disconnected."); if (isDBotHLRunning) stopDBotHL("Stream disconnected."); if (isAccuRunning) stopRunAccu("Stream disconnected."); if (isRSIBotRunning) stopRSIBot("Stream disconnected."); if (isBulkOnlyUDRunning) stopBulkOnlyUD("Stream disconnected."); if (isAIO1U8Running) stopAIO1U8("Stream disconnected."); if (isAIO2U7Running) stopAIO2U7("Stream disconnected."); if (isEdgeRotationActive) stopEdgeRotation("Stream disconnected."); if (isBulkOver2Armed) disarmBulkOver2(); if (isDiffersWatcherRunning) disarmDiffersWatcher("Stream disconnected."); }
