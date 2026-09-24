@@ -259,6 +259,41 @@ const RSI_BOT_INPUT_IDS = [
     'rsi-bot-ups-evencount', 'rsi-bot-downs-rsi', 'rsi-bot-downs-evencount'
 ];
 
+// DOM Bindings - Bulk Only Ups/Downs (AI Entry)
+const btnRunBulkOnlyUD = document.getElementById('btn-run-bulk-onlyud');
+const bulkOnlyUDInitialStakeInput = document.getElementById('bulk-onlyud-initial-stake');
+const bulkOnlyUDDurationInput = document.getElementById('bulk-onlyud-duration');
+const bulkOnlyUDMartingaleInput = document.getElementById('bulk-onlyud-martingale');
+const bulkOnlyUDTakeProfitInput = document.getElementById('bulk-onlyud-take-profit');
+const bulkOnlyUDStopLossInput = document.getElementById('bulk-onlyud-stop-loss');
+const bulkOnlyUDRSIPeriodInput = document.getElementById('bulk-onlyud-rsi-period');
+const bulkOnlyUDMinStreakInput = document.getElementById('bulk-onlyud-min-streak');
+const bulkOnlyUDUpsRSIInput = document.getElementById('bulk-onlyud-ups-rsi');
+const bulkOnlyUDDownsRSIInput = document.getElementById('bulk-onlyud-downs-rsi');
+const bulkOnlyUDHedgeRatioInput = document.getElementById('bulk-onlyud-hedge-ratio');
+const bulkOnlyUDStatusPanel = document.getElementById('bulk-onlyud-status');
+const bulkOnlyUDCurrentStakeDisplay = document.getElementById('bulk-onlyud-current-stake');
+const bulkOnlyUDRSIValueDisplay = document.getElementById('bulk-onlyud-rsi-value');
+const bulkOnlyUDStreakDisplay = document.getElementById('bulk-onlyud-streak-value');
+const bulkOnlyUDPLDisplay = document.getElementById('bulk-onlyud-pl');
+const bulkOnlyUDStatusText = document.getElementById('bulk-onlyud-status-text');
+
+const BULK_ONLYUD_INPUT_IDS = [
+    'bulk-onlyud-initial-stake', 'bulk-onlyud-duration', 'bulk-onlyud-martingale',
+    'bulk-onlyud-take-profit', 'bulk-onlyud-stop-loss', 'bulk-onlyud-rsi-period',
+    'bulk-onlyud-min-streak', 'bulk-onlyud-ups-rsi', 'bulk-onlyud-downs-rsi',
+    'bulk-onlyud-hedge-ratio'
+];
+
+let isBulkOnlyUDRunning = false;
+let bulkOnlyUDCurrentStake = 0;
+let bulkOnlyUDSessionPL = 0;
+let bulkOnlyUDPriceHistory = [];
+let bulkOnlyUDStreak = 0;
+let bulkOnlyUDLastDirection = 0; // 1 = up, -1 = down, 0 = none yet
+let bulkOnlyUDPendingLegIds = []; // contract_ids of the currently-open pair, both must settle before next entry
+let bulkOnlyUDPendingPL = 0; // accumulates profit across both legs of the open pair before deciding next stake
+
 let isRSIBotRunning = false;
 let rsiBotPriceHistory = [];
 let rsiBotDigitWindow = [];
@@ -654,6 +689,7 @@ function haltAllAutoModes() {
     if (isDBotHLRunning) stopDBotHL("Session target hit.");
     if (isAccuRunning) stopRunAccu("Session target hit.");
     if (isRSIBotRunning) stopRSIBot("Session target hit.");
+    if (isBulkOnlyUDRunning) stopBulkOnlyUD("Session target hit.");
     if (isAIO1U8Running) stopAIO1U8("Session target hit.");
     if (isAIO2U7Running) stopAIO2U7("Session target hit.");
     if (isEdgeRotationActive) stopEdgeRotation("Stopped - session TP/SL hit.");
@@ -1245,6 +1281,30 @@ function handleIncomingTickPacket(tickData) {
         if (rsiBotDigitWindow.length > digitWindowSize) rsiBotDigitWindow.shift();
     }
 
+    if (isBulkOnlyUDRunning) {
+        const period = parseInt(bulkOnlyUDRSIPeriodInput.value, 10) || 14;
+
+        // Live same-direction streak: how many consecutive ticks have moved the same way as the
+        // most recent one. This is the "confirmation" half of the entry filter - RSI says a
+        // direction is favored, the streak says a run is actually happening right now, not just
+        // hoped for.
+        if (bulkOnlyUDPriceHistory.length > 0) {
+            const prevPrice = bulkOnlyUDPriceHistory[bulkOnlyUDPriceHistory.length - 1];
+            const direction = tickData.quote > prevPrice ? 1 : (tickData.quote < prevPrice ? -1 : 0);
+            if (direction !== 0 && direction === bulkOnlyUDLastDirection) {
+                bulkOnlyUDStreak += 1;
+            } else if (direction !== 0) {
+                bulkOnlyUDStreak = 1;
+            }
+            if (direction !== 0) bulkOnlyUDLastDirection = direction;
+        }
+
+        bulkOnlyUDPriceHistory.push(tickData.quote);
+        if (bulkOnlyUDPriceHistory.length > period + 1) bulkOnlyUDPriceHistory.shift();
+
+        if (bulkOnlyUDStreakDisplay) bulkOnlyUDStreakDisplay.textContent = `${bulkOnlyUDStreak} (${bulkOnlyUDLastDirection > 0 ? 'up' : bulkOnlyUDLastDirection < 0 ? 'down' : '--'})`;
+    }
+
     if (isAIO1U8Running) {
         aiO1U8DigitHistory.push(lastDigit);
         if (aiO1U8DigitHistory.length > 2) aiO1U8DigitHistory.shift();
@@ -1269,6 +1329,7 @@ function handleIncomingTickPacket(tickData) {
 
     if (!isSessionLocked()) {
         if (isRSIBotRunning) evaluateRSIBotEntry();
+        if (isBulkOnlyUDRunning) evaluateBulkOnlyUDEntry();
         if (isAIO1U8Running) evaluateAIO1U8Entry();
 
         // Pattern OU: "fire if armed" runs BEFORE pattern detection, same as AI Over 2/Under 7 -
@@ -2055,6 +2116,166 @@ btnRunRSIBot.addEventListener('click', () => {
     logToConsole(`[AI Only Ups/Downs] Running. Ups: RSI>${rsiBotUpsRSIInput.value} & even-count=${rsiBotUpsEvenCountInput.value}. Downs: RSI<${rsiBotDownsRSIInput.value} & even-count=${rsiBotDownsEvenCountInput.value}.`, "success-msg");
 });
 
+// --- BULK ONLY UPS/DOWNS (AI ENTRY) ---
+// Fires Only Ups (RUNHIGH) and Only Downs (RUNLOW) at the same tick, matching Bulk Over/Under's
+// "both sides, same tick" structure. Unlike Over/Under, these two contracts are NOT complementary -
+// any single reversal tick kills a run, so a naive 50/50 bulk pair is just two independent coin
+// flips, not a hedge. So entry isn't unconditional: it waits for RSI to clear a threshold AND a
+// live same-direction streak to already be in progress (confirmation, not prediction), then splits
+// stake by which side the signal favors rather than betting both sides equally.
+function evaluateBulkOnlyUDEntry() {
+    if (!isBulkOnlyUDRunning || bulkOnlyUDPendingLegIds.length > 0) return;
+
+    const period = parseInt(bulkOnlyUDRSIPeriodInput.value, 10) || 14;
+    const minStreak = parseInt(bulkOnlyUDMinStreakInput.value, 10) || 3;
+
+    if (bulkOnlyUDPriceHistory.length < period + 1) {
+        if (bulkOnlyUDStatusText) { bulkOnlyUDStatusText.textContent = 'Collecting data...'; bulkOnlyUDStatusText.className = 'system-msg'; }
+        return;
+    }
+
+    const rsi = calculateRSI(bulkOnlyUDPriceHistory, period);
+    if (bulkOnlyUDRSIValueDisplay) bulkOnlyUDRSIValueDisplay.textContent = rsi === null ? '--' : rsi.toFixed(1);
+
+    const upsRSIThreshold = parseFloat(bulkOnlyUDUpsRSIInput.value);
+    const downsRSIThreshold = parseFloat(bulkOnlyUDDownsRSIInput.value);
+
+    const upFavored = rsi !== null && rsi > upsRSIThreshold && bulkOnlyUDLastDirection === 1 && bulkOnlyUDStreak >= minStreak;
+    const downFavored = rsi !== null && rsi < downsRSIThreshold && bulkOnlyUDLastDirection === -1 && bulkOnlyUDStreak >= minStreak;
+
+    if (upFavored) {
+        logToConsole(`[Bulk Only Ups/Downs] RSI ${rsi.toFixed(1)} > ${upsRSIThreshold} with a ${bulkOnlyUDStreak}-tick up-streak \u2014 entry confirmed, favoring Ups.`, "success-msg");
+        buyBulkOnlyUDPair('RUNHIGH');
+    } else if (downFavored) {
+        logToConsole(`[Bulk Only Ups/Downs] RSI ${rsi.toFixed(1)} < ${downsRSIThreshold} with a ${bulkOnlyUDStreak}-tick down-streak \u2014 entry confirmed, favoring Downs.`, "success-msg");
+        buyBulkOnlyUDPair('RUNLOW');
+    } else if (bulkOnlyUDStatusText) {
+        bulkOnlyUDStatusText.textContent = 'Watching...';
+        bulkOnlyUDStatusText.className = 'system-msg';
+    }
+}
+
+function buyBulkOnlyUDPair(favoredType) {
+    if (isSessionLocked()) {
+        logToConsole("[Session] Trading is locked until the next session opens.", "error-msg");
+        return;
+    }
+    if (!optionsWebSocket || optionsWebSocket.readyState !== WebSocket.OPEN) {
+        logToConsole("Error: Real-time stream must be connected before running trades.", "error-msg");
+        return;
+    }
+
+    const symbol = marketDropdown.value;
+    const duration = parseInt(bulkOnlyUDDurationInput.value, 10) || 3;
+    const currency = currencyText.textContent || "USD";
+    const hedgeRatio = Math.min(1, Math.max(0, parseFloat(bulkOnlyUDHedgeRatioInput.value) || 0));
+    const favoredStake = Math.round(bulkOnlyUDCurrentStake * 100) / 100;
+    const hedgeStake = Math.round(bulkOnlyUDCurrentStake * hedgeRatio * 100) / 100;
+    const otherType = favoredType === 'RUNHIGH' ? 'RUNLOW' : 'RUNHIGH';
+    const bulkRunToken = "BULK_ONLYUD_" + Date.now();
+
+    [{ type: favoredType, stake: favoredStake }, { type: otherType, stake: hedgeStake }].forEach(leg => {
+        if (leg.stake <= 0) return;
+        optionsWebSocket.send(JSON.stringify({
+            "buy": 1,
+            "price": leg.stake,
+            "subscribe": 1,
+            "parameters": {
+                "amount": leg.stake,
+                "basis": "stake",
+                "contract_type": leg.type,
+                "currency": currency,
+                "duration": duration,
+                "duration_unit": "t",
+                "underlying_symbol": symbol
+            },
+            "passthrough": { "bulkRunId": bulkRunToken }
+        }));
+    });
+
+    if (bulkOnlyUDStatusText) { bulkOnlyUDStatusText.textContent = `Trade Open (${favoredType === 'RUNHIGH' ? 'Ups' : 'Downs'} favored)`; bulkOnlyUDStatusText.className = 'system-msg'; }
+    logToConsole(`[${bulkRunToken}] Bought ${favoredType === 'RUNHIGH' ? 'Only Ups' : 'Only Downs'} at $${favoredStake.toFixed(2)} + ${otherType === 'RUNHIGH' ? 'Only Ups' : 'Only Downs'} at $${hedgeStake.toFixed(2)}.`, "success-msg");
+}
+
+function handleBulkOnlyUDSettled(combinedProfit) {
+    bulkOnlyUDSessionPL += combinedProfit;
+    if (bulkOnlyUDPLDisplay) {
+        bulkOnlyUDPLDisplay.textContent = `${bulkOnlyUDSessionPL >= 0 ? '+' : ''}${bulkOnlyUDSessionPL.toFixed(2)}`;
+        bulkOnlyUDPLDisplay.className = bulkOnlyUDSessionPL >= 0 ? 'success-msg' : 'error-msg';
+    }
+
+    const martingale = parseFloat(bulkOnlyUDMartingaleInput.value) || 1.3;
+    const initialStake = parseFloat(bulkOnlyUDInitialStakeInput.value) || 5;
+    if (combinedProfit >= 0) {
+        bulkOnlyUDCurrentStake = initialStake;
+    } else {
+        bulkOnlyUDCurrentStake = bulkOnlyUDCurrentStake * martingale;
+    }
+    if (bulkOnlyUDCurrentStakeDisplay) bulkOnlyUDCurrentStakeDisplay.textContent = bulkOnlyUDCurrentStake.toFixed(2);
+
+    const takeProfit = parseFloat(bulkOnlyUDTakeProfitInput.value) || 0;
+    const stopLoss = parseFloat(bulkOnlyUDStopLossInput.value) || 0;
+    if (takeProfit > 0 && bulkOnlyUDSessionPL >= takeProfit) {
+        stopBulkOnlyUD(`Take-profit hit (+${bulkOnlyUDSessionPL.toFixed(2)}).`);
+        return;
+    }
+    if (stopLoss > 0 && bulkOnlyUDSessionPL <= -stopLoss) {
+        stopBulkOnlyUD(`Stop-loss hit (${bulkOnlyUDSessionPL.toFixed(2)}).`);
+        return;
+    }
+
+    if (isBulkOnlyUDRunning) evaluateBulkOnlyUDEntry();
+}
+
+function stopBulkOnlyUD(reason) {
+    isBulkOnlyUDRunning = false;
+    btnRunBulkOnlyUD.textContent = "Run";
+    btnRunBulkOnlyUD.classList.remove('stream-active');
+    BULK_ONLYUD_INPUT_IDS.forEach(id => { const el = document.getElementById(id); if (el) el.disabled = false; });
+    if (bulkOnlyUDStatusPanel) bulkOnlyUDStatusPanel.style.display = 'none';
+
+    if (bulkOnlyUDPendingLegIds.length > 0 && optionsWebSocket && optionsWebSocket.readyState === WebSocket.OPEN) {
+        bulkOnlyUDPendingLegIds.forEach(id => {
+            optionsWebSocket.send(JSON.stringify({ "sell": id, "price": 0 }));
+        });
+        logToConsole(`[Bulk Only Ups/Downs] Force-selling ${bulkOnlyUDPendingLegIds.length} open leg(s).`, "system-msg");
+    }
+    bulkOnlyUDPendingLegIds = [];
+    bulkOnlyUDPendingPL = 0;
+
+    logToConsole(`[Bulk Only Ups/Downs] Stopped.${reason ? ' Reason: ' + reason : ''}`, "system-msg");
+}
+
+btnRunBulkOnlyUD.addEventListener('click', () => {
+    if (isBulkOnlyUDRunning) {
+        stopBulkOnlyUD("Manual stop.");
+        return;
+    }
+    if (isSessionLocked()) {
+        logToConsole("[Session] Trading is locked until the next session opens.", "error-msg");
+        return;
+    }
+
+    isBulkOnlyUDRunning = true;
+    bulkOnlyUDPriceHistory = [];
+    bulkOnlyUDStreak = 0;
+    bulkOnlyUDLastDirection = 0;
+    bulkOnlyUDSessionPL = 0;
+    bulkOnlyUDPendingLegIds = [];
+    bulkOnlyUDPendingPL = 0;
+    bulkOnlyUDCurrentStake = parseFloat(bulkOnlyUDInitialStakeInput.value) || 5;
+    btnRunBulkOnlyUD.textContent = "Stop";
+    btnRunBulkOnlyUD.classList.add('stream-active');
+    BULK_ONLYUD_INPUT_IDS.forEach(id => { const el = document.getElementById(id); if (el) el.disabled = true; });
+    if (bulkOnlyUDStatusPanel) bulkOnlyUDStatusPanel.style.display = 'flex';
+    if (bulkOnlyUDCurrentStakeDisplay) bulkOnlyUDCurrentStakeDisplay.textContent = bulkOnlyUDCurrentStake.toFixed(2);
+    if (bulkOnlyUDPLDisplay) { bulkOnlyUDPLDisplay.textContent = '0.00'; bulkOnlyUDPLDisplay.className = 'system-msg'; }
+    if (bulkOnlyUDRSIValueDisplay) bulkOnlyUDRSIValueDisplay.textContent = '--';
+    if (bulkOnlyUDStreakDisplay) bulkOnlyUDStreakDisplay.textContent = '--';
+    if (bulkOnlyUDStatusText) { bulkOnlyUDStatusText.textContent = 'Collecting data...'; bulkOnlyUDStatusText.className = 'system-msg'; }
+    logToConsole(`[Bulk Only Ups/Downs] Running. Ups: RSI>${bulkOnlyUDUpsRSIInput.value} + streak>=${bulkOnlyUDMinStreakInput.value}. Downs: RSI<${bulkOnlyUDDownsRSIInput.value} + streak>=${bulkOnlyUDMinStreakInput.value}. Hedge ratio: ${bulkOnlyUDHedgeRatioInput.value}.`, "success-msg");
+});
+
 // --- AI OVER 1/UNDER 8 (renamed logic per request: no scoring, just a fixed doubled-digit rule) ---
 // Watches the last 2 digits: if they're both 0 or both 1 (e.g. 0,0 or 1,1), it buys Over 1. If
 // they're both 8 or both 9 (e.g. 8,8 or 9,9), it buys Under 8. Same structure as the Differs
@@ -2433,6 +2654,9 @@ function handlePurchaseReceipt(buyReceipt, passthrough) {
     if (passthrough && passthrough.bulkRunId && passthrough.bulkRunId.startsWith("RSIBOT_")) {
         rsiBotActiveContractId = buyReceipt.contract_id;
     }
+    if (passthrough && passthrough.bulkRunId && passthrough.bulkRunId.startsWith("BULK_ONLYUD_")) {
+        bulkOnlyUDPendingLegIds.push(buyReceipt.contract_id);
+    }
     if (passthrough && passthrough.bulkRunId && passthrough.bulkRunId.startsWith("AIO1U8_")) {
         aiO1U8ActiveContractId = buyReceipt.contract_id;
         aiO1U8PurchasePending = false;
@@ -2571,6 +2795,18 @@ function handleContractUpdate(contract) {
             const profitValue = parseFloat(contract.profit) || 0;
             logToConsole(`[AI Only Ups/Downs] Contract settled (${contract.status}), profit ${profitValue.toFixed(2)}.`, "system-msg");
             if (isRSIBotRunning) handleRSIBotSettled(profitValue);
+        }
+        if (bulkOnlyUDPendingLegIds.includes(contract.contract_id)) {
+            bulkOnlyUDPendingLegIds = bulkOnlyUDPendingLegIds.filter(id => id !== contract.contract_id);
+            const profitValue = parseFloat(contract.profit) || 0;
+            bulkOnlyUDPendingPL += profitValue;
+            logToConsole(`[Bulk Only Ups/Downs] Leg settled (${contract.status}), profit ${profitValue.toFixed(2)}. ${bulkOnlyUDPendingLegIds.length} leg(s) still open.`, "system-msg");
+            if (bulkOnlyUDPendingLegIds.length === 0) {
+                const combinedProfit = bulkOnlyUDPendingPL;
+                bulkOnlyUDPendingPL = 0;
+                logToConsole(`[Bulk Only Ups/Downs] Pair settled. Combined profit ${combinedProfit.toFixed(2)}.`, "system-msg");
+                if (isBulkOnlyUDRunning) handleBulkOnlyUDSettled(combinedProfit);
+            }
         }
         if (contract.contract_id === aiO1U8ActiveContractId) {
             aiO1U8ActiveContractId = null;
@@ -3085,7 +3321,7 @@ function updateTradeControlsState(isActive) {
     btnRunRSIBot.disabled = !isReady;
     btnRunAIO1U8.disabled = !isReady;
     btnRunAIO2U7.disabled = !isReady;
-    if (!isReady) { toggleAutoEO(false); toggleAutoOU(false); toggleAutoPOU(false); if (isDBotOURunning) stopDBotOU("Stream disconnected."); if (isDBotHLRunning) stopDBotHL("Stream disconnected."); if (isAccuRunning) stopRunAccu("Stream disconnected."); if (isRSIBotRunning) stopRSIBot("Stream disconnected."); if (isAIO1U8Running) stopAIO1U8("Stream disconnected."); if (isAIO2U7Running) stopAIO2U7("Stream disconnected."); if (isEdgeRotationActive) stopEdgeRotation("Stream disconnected."); if (isBulkOver2Armed) disarmBulkOver2(); if (isDiffersWatcherRunning) disarmDiffersWatcher("Stream disconnected."); }
+    if (!isReady) { toggleAutoEO(false); toggleAutoOU(false); toggleAutoPOU(false); if (isDBotOURunning) stopDBotOU("Stream disconnected."); if (isDBotHLRunning) stopDBotHL("Stream disconnected."); if (isAccuRunning) stopRunAccu("Stream disconnected."); if (isRSIBotRunning) stopRSIBot("Stream disconnected."); if (isBulkOnlyUDRunning) stopBulkOnlyUD("Stream disconnected."); if (isAIO1U8Running) stopAIO1U8("Stream disconnected."); if (isAIO2U7Running) stopAIO2U7("Stream disconnected."); if (isEdgeRotationActive) stopEdgeRotation("Stream disconnected."); if (isBulkOver2Armed) disarmBulkOver2(); if (isDiffersWatcherRunning) disarmDiffersWatcher("Stream disconnected."); }
 }
 
 function disconnectExistingStream() {
